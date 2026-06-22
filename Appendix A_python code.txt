@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Monte Carlo Simulation: Bayesian Decision Framework for IOL Power Selection
 # 
-# # This notebook implements a Bayesian decision-theoretic framework to resolve IOL power disagreements among six modern formulas (Cooke K6, EVO, Hill-RBF 3.0, Hoffer QST, Kane, Pearl-DGS).
+# This notebook implements a Bayesian decision-theoretic framework to resolve IOL power disagreements among six modern formulas (Cooke K6, EVO, Hill-RBF 3.0, Hoffer QST, Kane, Pearl-DGS).
 #  
 # ---
 
@@ -51,7 +51,7 @@ n_formulas = len(formula_names)
 # --- Sensitivity analysis parameters ---
 HYPEROPIA_PENALTIES = [1.5, 2.0, 3.0]  # Test multiple penalties
 TRIGGER_THRESHOLDS = [0.50, 0.75, 1.00]  # Test multiple thresholds
-CORRELATION_RHO = 0.4  # Correlation coefficient for shared error
+CORRELATION_RHO = 0.4  # Target pairwise correlation coefficient
 
 # --- Baseline utility parameters (for main analysis) ---
 DEFAULT_HYPEROPIA_PENALTY = 2.0
@@ -59,16 +59,16 @@ DEFAULT_MYOPIA_PENALTY = 1.0
 DEFAULT_TRIGGER = 0.75  # D
 
 # --- Calibrated trigger for real-world matching ---
-CALIBRATED_TRIGGER = 1.00  # D (yields ~35-40% trigger rate)
+CALIBRATED_TRIGGER = 1.00  # D (yields 66.6% trigger rate in simulation)
 
 print("=" * 60)
 print("SIMULATION PARAMETERS (REVISED)")
 print("=" * 60)
 print(f"Number of virtual eyes: {N_SIMS:,}")
 print(f"Default trigger condition (range ≥): {DEFAULT_TRIGGER} D")
-print(f"Calibrated trigger (ESCRS-realistic): {CALIBRATED_TRIGGER} D")
+print(f"Calibrated trigger: {CALIBRATED_TRIGGER} D")
 print(f"Hyperopia penalty: {DEFAULT_HYPEROPIA_PENALTY}x worse than myopia")
-print(f"Correlation (shared error): {CORRELATION_RHO}")
+print(f"Target correlation (shared error): {CORRELATION_RHO}")
 print("\nFormula Standard Deviations (prediction error):")
 for name, sd in FORMULAS.items():
     print(f"  • {name}: {sd:.2f} D")
@@ -96,18 +96,29 @@ def get_log_likelihood(candidate, predictions, sigmas):
 def get_correlated_log_likelihood(candidate, predictions, sigmas, rho=0.4):
     """
     Compute log-likelihood with correlated errors.
-    Shared noise component added to all formulas.
+    Uses multivariate normal with covariance matrix:
+    Cov(X_i, X_j) = rho * sigma_i * sigma_j (off-diagonal)
+    Cov(X_i, X_i) = sigma_i^2 (diagonal)
     """
     n = len(predictions)
-    cov = np.outer(sigmas, sigmas) * rho
-    np.fill_diagonal(cov, sigmas**2)
+    # Build covariance matrix with pairwise correlation rho
+    cov = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                cov[i, j] = sigmas[i] ** 2
+            else:
+                cov[i, j] = rho * sigmas[i] * sigmas[j]
     
     diff = candidate - predictions
     try:
         inv_cov = np.linalg.pinv(cov)
         log_lik = -0.5 * diff @ inv_cov @ diff.T
+        # Add constant term for multivariate normal (optional, cancels in comparisons)
+        # log_lik -= 0.5 * n * np.log(2 * np.pi) + 0.5 * np.linalg.slogdet(cov)[1]
         return log_lik
     except:
+        # Fallback to independent if matrix is singular
         return np.sum(norm.logpdf(candidate, loc=predictions, scale=sigmas))
 
 # Test the utility function
@@ -126,6 +137,11 @@ print(f"  Hyperopia penalty: {DEFAULT_HYPEROPIA_PENALTY}x worse than myopia\n")
 def run_simulation(trigger_threshold=0.75, hyperopia_penalty=2.0, correlated=False, verbose=True):
     """
     Run the Monte Carlo simulation with specified parameters.
+    
+    For correlated errors (rho = CORRELATION_RHO):
+        X_i = μ + σ_i * (sqrt(rho) * Z + sqrt(1-rho) * ε_i)
+        where Z ~ N(0,1) and ε_i ~ N(0,1) independent
+        This yields Var(X_i) = σ_i^2 and Corr(X_i, X_j) = rho
     """
     start_time = time.time()
     
@@ -135,10 +151,14 @@ def run_simulation(trigger_threshold=0.75, hyperopia_penalty=2.0, correlated=Fal
     # Step 2: Generate formula predictions
     preds = np.zeros((N_SIMS, n_formulas))
     if correlated:
-        shared_noise = np.random.normal(0, CORRELATION_RHO, N_SIMS)
+        # Shared component: Z ~ N(0,1) scaled by sqrt(rho)
+        shared_noise = np.random.normal(0, 1, N_SIMS)  # Standard normal Z
         for i, sd in enumerate(sigma_values):
-            independent_noise = np.random.normal(0, sd * np.sqrt(1 - CORRELATION_RHO**2), N_SIMS)
-            preds[:, i] = true_powers + shared_noise * sd + independent_noise
+            # Independent component: ε_i ~ N(0,1) scaled by sqrt(1-rho)
+            independent_noise = np.random.normal(0, 1, N_SIMS)
+            # X_i = μ + σ_i * (sqrt(rho) * Z + sqrt(1-rho) * ε_i)
+            preds[:, i] = true_powers + sd * (np.sqrt(CORRELATION_RHO) * shared_noise + 
+                                               np.sqrt(1 - CORRELATION_RHO) * independent_noise)
     else:
         for i, sd in enumerate(sigma_values):
             preds[:, i] = np.random.normal(loc=true_powers, scale=sd, size=N_SIMS)
@@ -171,13 +191,8 @@ def run_simulation(trigger_threshold=0.75, hyperopia_penalty=2.0, correlated=Fal
         'median': {'errors': np.zeros(n), 'surprise': np.zeros(n, dtype=bool), 
                    'hyperopic': np.zeros(n, dtype=bool), 'utility': np.zeros(n)},
         'weighted': {'errors': np.zeros(n), 'surprise': np.zeros(n, dtype=bool), 
-                     'hyperopic': np.zeros(n, dtype=bool), 'utility': np.zeros(n)},
-        'barrett': {'errors': np.zeros(n), 'surprise': np.zeros(n, dtype=bool), 
-                    'hyperopic': np.zeros(n, dtype=bool), 'utility': np.zeros(n)}
+                     'hyperopic': np.zeros(n, dtype=bool), 'utility': np.zeros(n)}
     }
-    
-    # Find Barrett index (using EVO as proxy, since Barrett not in our list)
-    barrett_idx = formula_names.index('EVO')
     
     if verbose:
         print(f"\n🔄 Running Bayesian decision framework on triggered cases...")
@@ -226,9 +241,6 @@ def run_simulation(trigger_threshold=0.75, hyperopia_penalty=2.0, correlated=Fal
         weighted_mean = np.sum(preds_eye * weights) / np.sum(weights)
         weighted_power = np.round(weighted_mean * 2) / 2
         
-        # --- Barrett-only ---
-        barrett_power = np.round(preds_eye[barrett_idx] * 2) / 2
-        
         # --- Random Selection ---
         random_power = np.random.choice(candidates)
         
@@ -242,8 +254,7 @@ def run_simulation(trigger_threshold=0.75, hyperopia_penalty=2.0, correlated=Fal
             'random': random_power,
             'myopic': myopic_power,
             'median': median_power,
-            'weighted': weighted_power,
-            'barrett': barrett_power
+            'weighted': weighted_power
         }
         
         for name, selected_power in strategy_powers.items():
@@ -307,8 +318,7 @@ label_map = {
     'random': 'Random Selection',
     'myopic': 'Always-Myopic',
     'median': 'Median Consensus',
-    'weighted': 'Weighted Consensus',
-    'barrett': 'Barrett-Only'
+    'weighted': 'Weighted Consensus'
 }
 
 df_results.index = [label_map.get(idx, idx) for idx in df_results.index]
@@ -370,9 +380,7 @@ for penalty in HYPEROPIA_PENALTIES:
 
 df_penalty = pd.DataFrame(penalty_results).T
 
-# Fix: Check column names, not values for formatting
 print("\nTable 5: Sensitivity to Hyperopia Penalty")
-# Format separately for numeric columns
 print(df_penalty.round(3).to_string())
 
 # %% [markdown]
@@ -441,11 +449,11 @@ print("\nTable 7: Correlated Errors (ρ = 0.4)")
 print(df_corr[['mae', 'surprise_pct', 'hyperopic_pct', 'utility']].round(3).to_string())
 
 # %% [markdown]
-# ## 9. Calibrated Simulation (ESCRS-Realistic)
+# ## 9. Calibrated Simulation
 
 # %% [code]
 print("\n" + "=" * 70)
-print("CALIBRATED SIMULATION (ESCRS-REALISTIC TRIGGER = 1.00 D)")
+print("CALIBRATED SIMULATION (TRIGGER = 1.00 D)")
 print("=" * 70)
 
 strat_cal, _, _, _ = run_simulation(
@@ -461,7 +469,7 @@ df_cal.index = [label_map.get(idx, idx) for idx in df_cal.index]
 
 print("\nTable 8: Calibrated Simulation (1.00 D Trigger)")
 print("=" * 60)
-print(f"Trigger rate: {n_cal/N_SIMS*100:.1f}% (clinically realistic: ~35-40%)")
+print(f"Trigger rate: {n_cal/N_SIMS*100:.1f}%")
 print("\nMAE:")
 print(df_cal[['mae', 'std']].sort_values('mae').to_string(float_format=lambda x: f'{x:.3f}'))
 print("\nSurprise Rate:")
@@ -533,11 +541,9 @@ print(f"   Pure MLE would select {candidates[mle_idx]:.2f} D")
 median_power = np.median(candidates)
 weighted_mean = np.sum(preds_case[0] * (1.0 / np.array(sigma_values)**2)) / np.sum(1.0 / np.array(sigma_values)**2)
 weighted_power = np.round(weighted_mean * 2) / 2
-barrett_power = np.round(preds_case[0][formula_names.index('EVO')] * 2) / 2
 
 print(f"   Median Consensus would select {median_power:.2f} D")
 print(f"   Weighted Consensus would select {weighted_power:.2f} D")
-print(f"   Barrett-only would select {barrett_power:.2f} D")
 print(f"   Always-Myopic would select {np.max(candidates):.2f} D")
 
 if candidates[best_idx] != candidates[mle_idx]:
