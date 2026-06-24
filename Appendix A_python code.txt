@@ -2,6 +2,8 @@
 # # Monte Carlo Simulation: Bayesian Decision Framework for IOL Power Selection
 # 
 # This notebook implements a Bayesian decision-theoretic framework to resolve IOL power disagreements among six modern formulas (Cooke K6, EVO, Hill-RBF 3.0, Hoffer QST, Kane, Pearl-DGS).
+# 
+# **Trigger threshold: 0.50 D** (reflects the most clinically common scenario)
 #  
 # ---
 
@@ -56,17 +58,13 @@ CORRELATION_RHO = 0.4  # Target pairwise correlation coefficient
 # --- Baseline utility parameters (for main analysis) ---
 DEFAULT_HYPEROPIA_PENALTY = 2.0
 DEFAULT_MYOPIA_PENALTY = 1.0
-DEFAULT_TRIGGER = 0.75  # D
-
-# --- Calibrated trigger for real-world matching ---
-CALIBRATED_TRIGGER = 1.00  # D (yields 66.6% trigger rate in simulation)
+DEFAULT_TRIGGER = 0.50  # D (clinically most common scenario)
 
 print("=" * 60)
-print("SIMULATION PARAMETERS (REVISED)")
+print("SIMULATION PARAMETERS")
 print("=" * 60)
 print(f"Number of virtual eyes: {N_SIMS:,}")
-print(f"Default trigger condition (range ≥): {DEFAULT_TRIGGER} D")
-print(f"Calibrated trigger: {CALIBRATED_TRIGGER} D")
+print(f"Trigger condition (range ≥): {DEFAULT_TRIGGER} D")
 print(f"Hyperopia penalty: {DEFAULT_HYPEROPIA_PENALTY}x worse than myopia")
 print(f"Target correlation (shared error): {CORRELATION_RHO}")
 print("\nFormula Standard Deviations (prediction error):")
@@ -114,8 +112,6 @@ def get_correlated_log_likelihood(candidate, predictions, sigmas, rho=0.4):
     try:
         inv_cov = np.linalg.pinv(cov)
         log_lik = -0.5 * diff @ inv_cov @ diff.T
-        # Add constant term for multivariate normal (optional, cancels in comparisons)
-        # log_lik -= 0.5 * n * np.log(2 * np.pi) + 0.5 * np.linalg.slogdet(cov)[1]
         return log_lik
     except:
         # Fallback to independent if matrix is singular
@@ -134,7 +130,7 @@ print(f"  Hyperopia penalty: {DEFAULT_HYPEROPIA_PENALTY}x worse than myopia\n")
 # ## 3. Core Simulation Function
 
 # %% [code]
-def run_simulation(trigger_threshold=0.75, hyperopia_penalty=2.0, correlated=False, verbose=True):
+def run_simulation(trigger_threshold=0.50, hyperopia_penalty=2.0, correlated=False, verbose=True):
     """
     Run the Monte Carlo simulation with specified parameters.
     
@@ -163,7 +159,7 @@ def run_simulation(trigger_threshold=0.75, hyperopia_penalty=2.0, correlated=Fal
         for i, sd in enumerate(sigma_values):
             preds[:, i] = np.random.normal(loc=true_powers, scale=sd, size=N_SIMS)
     
-    # Step 3: Identify triggered cases
+    # Step 3: Identify triggered cases (range >= trigger_threshold)
     ranges = np.max(preds, axis=1) - np.min(preds, axis=1)
     triggered = ranges >= trigger_threshold
     triggered_indices = np.where(triggered)[0]
@@ -270,11 +266,11 @@ def run_simulation(trigger_threshold=0.75, hyperopia_penalty=2.0, correlated=Fal
     return strategies, true_powers, preds, triggered_indices
 
 # %% [markdown]
-# ## 4. Run Main Simulation (Default Parameters)
+# ## 4. Run Main Simulation (Default Parameters: Trigger = 0.50 D)
 
 # %% [code]
 print("\n" + "=" * 70)
-print("MAIN SIMULATION (DEFAULT PARAMETERS)")
+print("MAIN SIMULATION (TRIGGER = 0.50 D)")
 print("=" * 70)
 
 strategies, true_powers, preds, triggered_indices = run_simulation(
@@ -284,7 +280,7 @@ strategies, true_powers, preds, triggered_indices = run_simulation(
     verbose=True
 )
 
-n_triggered = len(triggered_indices)
+n_triggered_main = len(triggered_indices)  # Store main simulation trigger count
 
 # %% [markdown]
 # ## 5. Results: Main Simulation
@@ -309,7 +305,7 @@ def compute_metrics(strategies, n_triggered):
     return pd.DataFrame(results).T
 
 # Compute metrics
-df_results = compute_metrics(strategies, n_triggered)
+df_results = compute_metrics(strategies, n_triggered_main)
 
 # Label mapping
 label_map = {
@@ -329,17 +325,12 @@ print("=" * 70)
 print(df_results[['mae', 'std']].sort_values('mae').to_string(float_format=lambda x: f'{x:.3f}'))
 
 print("\n" + "=" * 70)
-print("TABLE 2: Refractive Surprise Rate (> ±0.50 D)")
+print("TABLE 2: Refractive Surprise and Hyperopic/Myopic Outcome Rates")
 print("=" * 70)
-print(df_results[['surprise_pct']].sort_values('surprise_pct').to_string(float_format=lambda x: f'{x:.1f}%'))
+print(df_results[['surprise_pct', 'hyperopic_pct', 'myopic_pct']].to_string(float_format=lambda x: f'{x:.1f}%'))
 
 print("\n" + "=" * 70)
-print("TABLE 3: Hyperopic vs. Myopic Outcome Rates")
-print("=" * 70)
-print(df_results[['hyperopic_pct', 'myopic_pct']].to_string(float_format=lambda x: f'{x:.1f}%'))
-
-print("\n" + "=" * 70)
-print("TABLE 4: Expected Utility (Higher is Better)")
+print("TABLE 3: Expected Utility (Higher is Better)")
 print("=" * 70)
 print(df_results[['utility']].sort_values('utility', ascending=False).to_string(float_format=lambda x: f'{x:.3f}'))
 
@@ -380,7 +371,7 @@ for penalty in HYPEROPIA_PENALTIES:
 
 df_penalty = pd.DataFrame(penalty_results).T
 
-print("\nTable 5: Sensitivity to Hyperopia Penalty")
+print("\nTable 4: Sensitivity to Hyperopia Penalty")
 print(df_penalty.round(3).to_string())
 
 # %% [markdown]
@@ -401,14 +392,14 @@ for threshold in TRIGGER_THRESHOLDS:
         verbose=False
     )
     
-    n_triggered = len(strat['bayes']['errors'])
+    n_triggered_temp = len(strat['bayes']['errors'])  # Renamed to avoid overwriting main variable
     bayes_mae = np.mean(strat['bayes']['errors'])
     bayes_utility = np.mean(strat['bayes']['utility'])
     bayes_hyperopic = np.mean(strat['bayes']['hyperopic']) * 100
     mle_mae = np.mean(strat['mle']['errors'])
     mle_utility = np.mean(strat['mle']['utility'])
     mle_hyperopic = np.mean(strat['mle']['hyperopic']) * 100
-    trigger_rate = n_triggered / N_SIMS * 100
+    trigger_rate = n_triggered_temp / N_SIMS * 100
     
     trigger_results[threshold] = {
         'Trigger_Rate': trigger_rate,
@@ -421,7 +412,7 @@ for threshold in TRIGGER_THRESHOLDS:
     }
 
 df_trigger = pd.DataFrame(trigger_results).T
-print("\nTable 6: Sensitivity to Trigger Threshold")
+print("\nTable 5: Sensitivity to Trigger Threshold")
 print(df_trigger.round(3).to_string())
 
 # %% [markdown]
@@ -445,51 +436,21 @@ n_corr = len(strat_corr['bayes']['errors'])
 df_corr = compute_metrics(strat_corr, n_corr)
 df_corr.index = [label_map.get(idx, idx) for idx in df_corr.index]
 
-print("\nTable 7: Correlated Errors (ρ = 0.4)")
+print("\nTable 6: Correlated Errors (ρ = 0.4)")
 print(df_corr[['mae', 'surprise_pct', 'hyperopic_pct', 'utility']].round(3).to_string())
 
 # %% [markdown]
-# ## 9. Calibrated Simulation
+# ## 9. Clinical Case Example #1 (Range = 0.50 D, Triggered)
 
 # %% [code]
 print("\n" + "=" * 70)
-print("CALIBRATED SIMULATION (TRIGGER = 1.00 D)")
-print("=" * 70)
-
-strat_cal, _, _, _ = run_simulation(
-    trigger_threshold=CALIBRATED_TRIGGER,
-    hyperopia_penalty=DEFAULT_HYPEROPIA_PENALTY,
-    correlated=False,
-    verbose=True
-)
-
-n_cal = len(strat_cal['bayes']['errors'])
-df_cal = compute_metrics(strat_cal, n_cal)
-df_cal.index = [label_map.get(idx, idx) for idx in df_cal.index]
-
-print("\nTable 8: Calibrated Simulation (1.00 D Trigger)")
-print("=" * 60)
-print(f"Trigger rate: {n_cal/N_SIMS*100:.1f}%")
-print("\nMAE:")
-print(df_cal[['mae', 'std']].sort_values('mae').to_string(float_format=lambda x: f'{x:.3f}'))
-print("\nSurprise Rate:")
-print(df_cal[['surprise_pct']].sort_values('surprise_pct').to_string(float_format=lambda x: f'{x:.1f}%'))
-print("\nHyperopia Rate:")
-print(df_cal[['hyperopic_pct']].sort_values('hyperopic_pct').to_string(float_format=lambda x: f'{x:.1f}%'))
-print("\nExpected Utility:")
-print(df_cal[['utility']].sort_values('utility', ascending=False).to_string(float_format=lambda x: f'{x:.3f}'))
-
-# %% [markdown]
-# ## 10. Clinical Case Example
-
-# %% [code]
-print("\n" + "=" * 70)
-print("CLINICAL CASE EXAMPLE: ESCRS CALCULATOR SPLIT-SCREEN")
+print("CLINICAL CASE EXAMPLE #1 (Range = 0.50 D, TRIGGERED)")
 print("=" * 70)
 
 print("\nCase: AL 25.40 mm, K ~42.28 D, Vivity EDOF lens")
+print("Formula split: 4 formulas at +16.50 D, 2 formulas at +17.00 D (Range = 0.50 D)")
 
-formula_outputs = {
+formula_outputs_1 = {
     'Cooke_K6': 17.00,
     'EVO': 16.50,
     'Hill_RBF': 17.00,
@@ -499,62 +460,139 @@ formula_outputs = {
 }
 
 print("\nFormula Outputs:")
-for name, power in formula_outputs.items():
+for name, power in formula_outputs_1.items():
     print(f"  {name}: {power:.2f} D")
 
 candidates = np.array([16.50, 17.00])
-preds_case = np.array([list(formula_outputs.values())])
+preds_case_1 = np.array([list(formula_outputs_1.values())])
 
 # Compute log-likelihoods and posterior
-log_likelihoods = []
+log_likelihoods_1 = []
 for cand in candidates:
-    log_likelihoods.append(get_log_likelihood(cand, preds_case[0], sigma_values))
+    log_likelihoods_1.append(get_log_likelihood(cand, preds_case_1[0], sigma_values))
 
-log_likelihoods = np.array(log_likelihoods)
-max_ll = np.max(log_likelihoods)
-likelihoods = np.exp(log_likelihoods - max_ll)
-posterior_probs = likelihoods / np.sum(likelihoods)
+log_likelihoods_1 = np.array(log_likelihoods_1)
+max_ll_1 = np.max(log_likelihoods_1)
+likelihoods_1 = np.exp(log_likelihoods_1 - max_ll_1)
+posterior_probs_1 = likelihoods_1 / np.sum(likelihoods_1)
 
 print(f"\nPosterior probabilities:")
 for i, cand in enumerate(candidates):
-    print(f"  P(True Power = {cand:.2f} D | Data) = {posterior_probs[i]:.3f}")
+    print(f"  P(True Power = {cand:.2f} D | Data) = {posterior_probs_1[i]:.3f}")
 
 # Expected utility for each choice
-expected_utilities = []
+expected_utilities_1 = []
 for j, cand in enumerate(candidates):
     exp_util = 0
     for k, other_cand in enumerate(candidates):
-        exp_util += posterior_probs[k] * utility(cand, other_cand, DEFAULT_HYPEROPIA_PENALTY)
-    expected_utilities.append(exp_util)
+        exp_util += posterior_probs_1[k] * utility(cand, other_cand, DEFAULT_HYPEROPIA_PENALTY)
+    expected_utilities_1.append(exp_util)
 
 print(f"\nExpected utility for each choice:")
 for i, cand in enumerate(candidates):
-    print(f"  Select {cand:.2f} D: Expected Utility = {expected_utilities[i]:.3f}")
+    print(f"  Select {cand:.2f} D: Expected Utility = {expected_utilities_1[i]:.3f}")
 
-best_idx = np.argmax(expected_utilities)
-print(f"\n✅ Bayesian decision framework selects {candidates[best_idx]:.2f} D (maximizes expected utility)")
+best_idx_1 = np.argmax(expected_utilities_1)
+print(f"\n✅ Bayesian decision framework selects {candidates[best_idx_1]:.2f} D (maximizes expected utility)")
 
-mle_idx = np.argmax(log_likelihoods)
-print(f"   Pure MLE would select {candidates[mle_idx]:.2f} D")
+mle_idx_1 = np.argmax(log_likelihoods_1)
+print(f"   Pure MLE would select {candidates[mle_idx_1]:.2f} D")
 
 # Compute comparator strategies
-median_power = np.median(candidates)
-weighted_mean = np.sum(preds_case[0] * (1.0 / np.array(sigma_values)**2)) / np.sum(1.0 / np.array(sigma_values)**2)
-weighted_power = np.round(weighted_mean * 2) / 2
+median_power_1 = np.median(candidates)
+weighted_mean_1 = np.sum(preds_case_1[0] * (1.0 / np.array(sigma_values)**2)) / np.sum(1.0 / np.array(sigma_values)**2)
+weighted_power_1 = np.round(weighted_mean_1 * 2) / 2
 
-print(f"   Median Consensus would select {median_power:.2f} D")
-print(f"   Weighted Consensus would select {weighted_power:.2f} D")
+print(f"   Median Consensus would select {median_power_1:.2f} D")
+print(f"   Weighted Consensus would select {weighted_power_1:.2f} D")
 print(f"   Always-Myopic would select {np.max(candidates):.2f} D")
 
-if candidates[best_idx] != candidates[mle_idx]:
+if candidates[best_idx_1] != candidates[mle_idx_1]:
+    print(f"\n   The Bayesian decision framework diverges from MLE due to asymmetric risk.")
+else:
+    print(f"\n   The Bayesian decision framework agrees with MLE in this case.")
+
+print("\nClinical Takeaway: With strong formula consensus (4 vs. 2), the Bayesian framework")
+print("follows the data and selects 16.50 D. The asymmetric hyperopia penalty only becomes")
+print("decisive when the data is more evenly split (e.g., 3 vs. 3).")
+
+# %% [markdown]
+# ## 10. Clinical Case Example #2 (Range = 0.50 D, Triggered)
+
+# %% [code]
+print("\n" + "=" * 70)
+print("CLINICAL CASE EXAMPLE #2 (Range = 0.50 D, TRIGGERED)")
+print("=" * 70)
+
+print("\nCase: AL 25.20 mm, K ~42.28 D, Vivity EDOF lens")
+print("Formula split: 3 formulas at +16.50 D, 3 formulas at +17.00 D (Range = 0.50 D)")
+
+formula_outputs_2 = {
+    'Cooke_K6': 17.00,
+    'EVO': 16.50,
+    'Hill_RBF': 17.00,
+    'Hoffer_QST': 16.50,
+    'Kane': 17.00,
+    'Pearl_DGS': 16.50
+}
+
+print("\nFormula Outputs:")
+for name, power in formula_outputs_2.items():
+    print(f"  {name}: {power:.2f} D")
+
+candidates = np.array([16.50, 17.00])
+preds_case_2 = np.array([list(formula_outputs_2.values())])
+
+# Compute log-likelihoods and posterior
+log_likelihoods_2 = []
+for cand in candidates:
+    log_likelihoods_2.append(get_log_likelihood(cand, preds_case_2[0], sigma_values))
+
+log_likelihoods_2 = np.array(log_likelihoods_2)
+max_ll_2 = np.max(log_likelihoods_2)
+likelihoods_2 = np.exp(log_likelihoods_2 - max_ll_2)
+posterior_probs_2 = likelihoods_2 / np.sum(likelihoods_2)
+
+print(f"\nPosterior probabilities:")
+for i, cand in enumerate(candidates):
+    print(f"  P(True Power = {cand:.2f} D | Data) = {posterior_probs_2[i]:.3f}")
+
+# Expected utility for each choice
+expected_utilities_2 = []
+for j, cand in enumerate(candidates):
+    exp_util = 0
+    for k, other_cand in enumerate(candidates):
+        exp_util += posterior_probs_2[k] * utility(cand, other_cand, DEFAULT_HYPEROPIA_PENALTY)
+    expected_utilities_2.append(exp_util)
+
+print(f"\nExpected utility for each choice:")
+for i, cand in enumerate(candidates):
+    print(f"  Select {cand:.2f} D: Expected Utility = {expected_utilities_2[i]:.3f}")
+
+best_idx_2 = np.argmax(expected_utilities_2)
+print(f"\n✅ Bayesian decision framework selects {candidates[best_idx_2]:.2f} D (maximizes expected utility)")
+
+mle_idx_2 = np.argmax(log_likelihoods_2)
+print(f"   Pure MLE would select {candidates[mle_idx_2]:.2f} D")
+
+# Compute comparator strategies
+median_power_2 = np.median(candidates)
+weighted_mean_2 = np.sum(preds_case_2[0] * (1.0 / np.array(sigma_values)**2)) / np.sum(1.0 / np.array(sigma_values)**2)
+weighted_power_2 = np.round(weighted_mean_2 * 2) / 2
+
+print(f"   Median Consensus would select {median_power_2:.2f} D")
+print(f"   Weighted Consensus would select {weighted_power_2:.2f} D")
+print(f"   Always-Myopic would select {np.max(candidates):.2f} D")
+
+if candidates[best_idx_2] != candidates[mle_idx_2]:
     print(f"\n   The Bayesian decision framework diverges from MLE due to asymmetric risk.")
     print(f"   The myopic guard (higher power) is selected to avoid hyperopia.")
 else:
     print(f"\n   The Bayesian decision framework agrees with MLE in this case.")
 
-print("\nClinical Takeaway: The Bayesian decision framework balances formula consensus")
-print("with asymmetric risk, providing a mathematically justifiable decision that")
-print("minimizes the expected clinical cost of hyperopia.\n")
+print("\nClinical Takeaway: With a 3 vs. 3 split, the posterior probabilities are closer.")
+print("The asymmetric hyperopia penalty tilts the decision toward the higher power (17.00 D)")
+print("to protect against the worse outcome of hyperopia.")
 
 # %% [markdown]
 # ## 11. Summary Statistics
@@ -564,23 +602,28 @@ print("\n" + "=" * 70)
 print("SUMMARY STATISTICS")
 print("=" * 70)
 
+# Store trigger rates (using the renamed variables)
+trigger_0_50 = n_triggered_main / N_SIMS * 100  # Main simulation (0.50 D) - now correct
+trigger_0_75 = df_trigger.loc[0.75, 'Trigger_Rate']  # From trigger threshold analysis
+trigger_1_00 = df_trigger.loc[1.00, 'Trigger_Rate']  # From trigger threshold analysis
+
 print(f"\nTotal eyes: {N_SIMS:,}")
-print(f"Default trigger rate (0.75 D): {n_triggered/N_SIMS*100:.1f}%")
-print(f"Calibrated trigger rate (1.00 D): {n_cal/N_SIMS*100:.1f}%")
-print(f"Correlated trigger rate (ρ=0.4): {n_corr/N_SIMS*100:.1f}%")
+print(f"Trigger rate (0.50 D): {trigger_0_50:.1f}%")
+print(f"Trigger rate (0.75 D): {trigger_0_75:.1f}%")
+print(f"Trigger rate (1.00 D): {trigger_1_00:.1f}%")
 
-print("\n--- Performance Comparison (Calibrated: 1.00 D Trigger) ---")
-print(f"MAE: Bayesian {df_cal.loc['Bayesian Decision', 'mae']:.3f} D | MLE {df_cal.loc['Pure MLE', 'mae']:.3f} D | Random {df_cal.loc['Random Selection', 'mae']:.3f} D | Myopic {df_cal.loc['Always-Myopic', 'mae']:.3f} D")
-print(f"Surprise: Bayesian {df_cal.loc['Bayesian Decision', 'surprise_pct']:.1f}% | MLE {df_cal.loc['Pure MLE', 'surprise_pct']:.1f}% | Random {df_cal.loc['Random Selection', 'surprise_pct']:.1f}% | Myopic {df_cal.loc['Always-Myopic', 'surprise_pct']:.1f}%")
-print(f"Hyperopia: Bayesian {df_cal.loc['Bayesian Decision', 'hyperopic_pct']:.1f}% | MLE {df_cal.loc['Pure MLE', 'hyperopic_pct']:.1f}% | Random {df_cal.loc['Random Selection', 'hyperopic_pct']:.1f}% | Myopic {df_cal.loc['Always-Myopic', 'hyperopic_pct']:.1f}%")
-print(f"Utility: Bayesian {df_cal.loc['Bayesian Decision', 'utility']:.3f} | MLE {df_cal.loc['Pure MLE', 'utility']:.3f} | Random {df_cal.loc['Random Selection', 'utility']:.3f} | Myopic {df_cal.loc['Always-Myopic', 'utility']:.3f}")
+print("\n--- Performance Comparison (Trigger = 0.50 D) ---")
+print(f"MAE: Bayesian {df_results.loc['Bayesian Decision', 'mae']:.3f} D | MLE {df_results.loc['Pure MLE', 'mae']:.3f} D | Random {df_results.loc['Random Selection', 'mae']:.3f} D | Myopic {df_results.loc['Always-Myopic', 'mae']:.3f} D")
+print(f"Surprise: Bayesian {df_results.loc['Bayesian Decision', 'surprise_pct']:.1f}% | MLE {df_results.loc['Pure MLE', 'surprise_pct']:.1f}% | Random {df_results.loc['Random Selection', 'surprise_pct']:.1f}% | Myopic {df_results.loc['Always-Myopic', 'surprise_pct']:.1f}%")
+print(f"Hyperopia: Bayesian {df_results.loc['Bayesian Decision', 'hyperopic_pct']:.1f}% | MLE {df_results.loc['Pure MLE', 'hyperopic_pct']:.1f}% | Random {df_results.loc['Random Selection', 'hyperopic_pct']:.1f}% | Myopic {df_results.loc['Always-Myopic', 'hyperopic_pct']:.1f}%")
+print(f"Utility: Bayesian {df_results.loc['Bayesian Decision', 'utility']:.3f} | MLE {df_results.loc['Pure MLE', 'utility']:.3f} | Random {df_results.loc['Random Selection', 'utility']:.3f} | Myopic {df_results.loc['Always-Myopic', 'utility']:.3f}")
 
-# Find best strategy for calibrated simulation
-best_mae_cal = df_cal['mae'].idxmin()
-best_utility_cal = df_cal['utility'].idxmax()
+# Find best strategy
+best_mae = df_results['mae'].idxmin()
+best_utility = df_results['utility'].idxmax()
 
-print(f"\nBest MAE: {best_mae_cal} ({df_cal.loc[best_mae_cal, 'mae']:.3f} D)")
-print(f"Best Utility: {best_utility_cal} ({df_cal.loc[best_utility_cal, 'utility']:.3f})")
+print(f"\nBest MAE: {best_mae} ({df_results.loc[best_mae, 'mae']:.3f} D)")
+print(f"Best Utility: {best_utility} ({df_results.loc[best_utility, 'utility']:.3f})")
 
 print("\n" + "=" * 70)
 print("CONCLUSION")
